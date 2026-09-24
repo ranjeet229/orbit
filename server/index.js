@@ -11,6 +11,10 @@ import helmet from "helmet";
 import { rateLimit } from "express-rate-limit";
 import { Server } from "socket.io";
 import { allowedOrigins } from "./origins.js";
+import { createAdapter } from '@socket.io/mongo-adapter';
+import { Emitter } from '@socket.io/mongo-emitter';
+import { attachDatabasePool, waitUntil } from '@vercel/functions';
+import { MongoRateLimitStore } from './mongo-rate-limit.js';
 import {
   credentials,
   registration,
@@ -20,6 +24,7 @@ import {
 } from "./validation.js";
 
 const production = process.env.NODE_ENV === "production";
+const distributed = process.env.VERCEL === '1' || process.env.REALTIME_DISTRIBUTED === 'true';
 const origin = process.env.APP_ORIGIN || "http://localhost:5173";
 const origins = allowedOrigins(origin, production);
 if (
@@ -89,6 +94,10 @@ const Session = mongoose.model(
   }),
 );
 const app = express();
+const Presence = mongoose.model('Presence', new mongoose.Schema({ _id:String, user:{type:String,index:true}, session:String, expires:{type:Date,expires:0} }));
+const RateBucket = mongoose.model('RateBucket', new mongoose.Schema({_id:String,hits:Number,expires:{type:Date,expires:0}}));
+let connectionPromise;
+let eventCollection;
 if (process.env.TRUST_PROXY)
   app.set("trust proxy", Number(process.env.TRUST_PROXY));
 app.use(
@@ -106,7 +115,9 @@ app.use(
   }),
 );
 app.use(express.json({ limit: "16kb" }), cookieParser());
-app.use("/api", rateLimit({ windowMs: 60000, limit: 180 }));
+app.use(async (req,res,next) => { try { await initialize(); next(); } catch { res.status(503).json({error:'The service is temporarily unavailable. Please retry.'}); } });
+app.use('/api', (req,res,next) => { res.set('Cache-Control','private, no-store'); next(); });
+app.use("/api", rateLimit({ windowMs: 60000, limit: 180, ...(distributed ? {store:new MongoRateLimitStore(RateBucket,'api')} : {}) }));
 app.use("/api", (req, res, next) => {
   if (
     !["GET", "HEAD", "OPTIONS"].includes(req.method) &&
@@ -117,12 +128,33 @@ app.use("/api", (req, res, next) => {
 });
 const http = createServer(app);
 const io = new Server(http, {
+  path: '/api/server/socket.io',
+  transports: ['websocket'],
   cors: { origin: origins, credentials: true },
   maxHttpBufferSize: 16384,
   // Same-origin polling GETs can omit Origin; cross-origin WebSocket handshakes must match.
-  allowRequest: (req, cb) =>
-    cb(null, !req.headers.origin || origins.includes(req.headers.origin)),
+  allowRequest: (req, cb) => {
+    if (req.headers.origin && !origins.includes(req.headers.origin)) return cb('Origin not allowed',false);
+    initialize().then(()=>cb(null,true)).catch(()=>cb('Service unavailable',false));
+  },
 });
+// The emitter does not return its insertion promise. Capture it explicitly so an
+// API response cannot finish before a cross-instance event is persisted.
+async function clusterOperation(operation) {
+  if (!distributed) { operation(io); return; }
+  const writes=[];
+  const emitter = new Emitter({insertOne(document) { const write=eventCollection.insertOne(document); writes.push(write); return write; }}, '/', {addCreatedAtField:true});
+  operation(emitter);
+  await Promise.all(writes);
+}
+async function emitTo(rooms, event, payload) {
+  // Serialize Mongoose documents before BSON transport (ObjectIds must be strings).
+  await clusterOperation(emitter=>emitter.to(rooms.map(String)).emit(event,JSON.parse(JSON.stringify(payload))));
+}
+function background(task) {
+  const guarded=task.catch(()=>console.error('Realtime background operation failed.'));
+  if(process.env.VERCEL === '1') waitUntil(guarded);
+}
 const publicUser = (u) => ({
   _id: String(u._id),
   name: u.name,
@@ -145,6 +177,7 @@ async function auth(req, res, next) {
   }
 }
 const authLimit = rateLimit({
+  ...(distributed ? {store:new MongoRateLimitStore(RateBucket,'auth')} : {}),
   windowMs: 15 * 60000,
   limit: 20,
   message: { error: "Too many attempts. Please try again in 15 minutes." },
@@ -235,7 +268,8 @@ app.get("/api/auth/me", auth, async (req, res) => {
 });
 app.post("/api/auth/logout", auth, async (req, res) => {
   await Session.findByIdAndDelete(req.identity.jti);
-  io.in(`session:${req.identity.jti}`).disconnectSockets(true);
+  await clusterOperation(emitter=>emitter.in(`session:${req.identity.jti}`).disconnectSockets(true));
+  if(distributed) { await Presence.deleteMany({session:req.identity.jti}); await broadcastPresence(req.uid); }
   res.clearCookie("orbit", { path: "/" });
   res.json({ ok: true });
 });
@@ -282,7 +316,7 @@ app.post("/api/conversations", auth, async (req, res) => {
     }
   }
   await conversation.populate("members", "name email color");
-  members.forEach((id) => io.to(id).emit("conversation", conversation));
+  await emitTo(members, 'conversation', conversation);
   await Promise.all(members.map(syncPresence));
   res.json(conversation);
 });
@@ -322,7 +356,7 @@ app.post("/api/conversations/:id/messages", auth, async (req, res) => {
   await message.populate("sender", "name color");
   chat.lastMessage = data.text;
   await chat.save();
-  chat.members.forEach((id) => io.to(String(id)).emit("message", message));
+  await emitTo(chat.members, 'message', message);
   res.status(201).json(message);
 });
 app.post("/api/conversations/:id/read", auth, async (req, res) => {
@@ -351,13 +385,11 @@ async function recordReceipt(chat, uid, messageIds, kind) {
           : { deliveredBy: uid },
     },
   );
-  chat.members.forEach((id) =>
-    io.to(String(id)).emit(kind, {
+  await emitTo(chat.members, kind, {
       conversation: String(chat._id),
       user: uid,
       messageIds: ids,
-    }),
-  );
+    });
 }
 const online = new Map();
 io.use(async (socket, next) => {
@@ -376,36 +408,35 @@ io.use(async (socket, next) => {
 });
 async function syncPresence(uid) {
   const chats = await Conversation.find({ members: uid }).select("members");
-  io.to(uid).emit(
-    "online",
-    [...new Set(chats.flatMap((c) => c.members.map(String)))].filter((id) =>
-      online.has(id),
-    ),
-  );
+  const peers=[...new Set(chats.flatMap(c=>c.members.map(String)))];
+  const active = distributed ? await Presence.distinct('user',{user:{$in:peers},expires:{$gt:new Date()}}) : peers.filter(id=>online.has(id));
+  await emitTo([uid], 'online', active);
 }
 async function broadcastPresence(uid) {
   const chats = await Conversation.find({ members: uid }).select("members");
   const peers = new Set(chats.flatMap((c) => c.members.map(String)));
-  peers.forEach((id) =>
-    io.to(id).emit("presence", { id: uid, online: online.has(uid) }),
-  );
+  const active = distributed ? !!await Presence.exists({user:uid,expires:{$gt:new Date()}}) : online.has(uid);
+  await emitTo([...peers], 'presence', {id:uid,online:active});
 }
 io.on("connection", async (socket) => {
   const uid = socket.identity.sub;
   socket.join(uid);
   socket.join(`session:${socket.identity.jti}`);
   online.set(uid, (online.get(uid) || 0) + 1);
+  let heartbeat;
   const expiry = setTimeout(
     () => socket.disconnect(true),
     Math.max(1, socket.identity.exp * 1000 - Date.now()),
   );
   socket.on("disconnect", () => {
     clearTimeout(expiry);
+    clearInterval(heartbeat);
     online.set(uid, Math.max(0, (online.get(uid) || 1) - 1));
     if (!online.get(uid)) {
       online.delete(uid);
-      broadcastPresence(uid).catch(() => {});
+      if(!distributed) background(broadcastPresence(uid));
     }
+    if(distributed) background(Presence.deleteOne({_id:socket.id}).then(()=>broadcastPresence(uid)));
   });
   socket.on("delivered", async (payload = {}) => {
     try {
@@ -415,6 +446,15 @@ io.on("connection", async (socket) => {
     } catch {}
   });
   try {
+    if(distributed) {
+      await Presence.create({_id:socket.id,user:uid,session:socket.identity.jti,expires:new Date(Date.now()+60000)});
+      if(!socket.connected) { await Presence.deleteOne({_id:socket.id}); return; }
+      heartbeat=setInterval(()=>background((async()=>{
+        await Presence.updateOne({_id:socket.id},{$set:{expires:new Date(Date.now()+60000)}});
+        await syncPresence(uid);
+      })()),20000);
+      heartbeat.unref?.();
+    }
     await broadcastPresence(uid);
     await syncPresence(uid);
     const chats = await Conversation.find({ members: uid }).select("members");
@@ -446,11 +486,7 @@ io.on("connection", async (socket) => {
     try {
       const chat = await member(conversation, uid);
       if (chat)
-        chat.members
-          .filter((id) => String(id) !== uid)
-          .forEach((id) =>
-            io.to(String(id)).emit("typing", { conversation, user: uid }),
-          );
+        await emitTo(chat.members.filter(id=>String(id)!==uid), 'typing', {conversation,user:uid});
     } catch {}
   });
 });
@@ -469,24 +505,22 @@ app.use((err, req, res, next) => {
       .json({ error: "An account with this email already exists." });
   res.status(500).json({ error: "Something went wrong. Please try again." });
 });
-try {
-  await mongoose.connect(process.env.MONGODB_URI, {
-    serverSelectionTimeoutMS: 10000,
-  });
-  await Promise.all([
-    User.init(),
-    Conversation.init(),
-    Message.init(),
-    Session.init(),
-  ]);
-  http.listen(process.env.PORT || 4000, () =>
-    console.log("Orbit API ready on port " + (process.env.PORT || 4000)),
-  );
-} catch (error) {
-  console.error(
-    "Database connection failed. Check MongoDB credentials, Atlas network access, and DNS. (" +
-      error.name +
-      ")",
-  );
-  process.exit(1);
+export function initialize() {
+  if(!connectionPromise) connectionPromise=(async()=>{
+    await mongoose.connect(process.env.MONGODB_URI,{serverSelectionTimeoutMS:10000,maxPoolSize:10,minPoolSize:0,maxIdleTimeMS:60000});
+    await Promise.all([User.init(),Conversation.init(),Message.init(),Session.init(),Presence.init(),RateBucket.init()]);
+    if(distributed) {
+      const hello=await mongoose.connection.db.admin().command({hello:1});
+      if(!hello.setName && hello.msg !== 'isdbgrid') throw Error('Distributed Socket.IO requires MongoDB Atlas or a replica set.');
+      eventCollection=mongoose.connection.db.collection('socket_events');
+      await eventCollection.createIndex({createdAt:1},{expireAfterSeconds:3600});
+      io.adapter(createAdapter(eventCollection,{addCreatedAtField:true}));
+      if(process.env.VERCEL === '1') attachDatabasePool(mongoose.connection.getClient());
+    }
+  })().catch(async error=>{ connectionPromise=undefined; await mongoose.disconnect().catch(()=>{}); throw error; });
+  return connectionPromise;
+}
+export default http;
+if(process.env.VERCEL !== '1' && process.env.SERVERLESS !== 'true') {
+  initialize().then(()=>http.listen(process.env.PORT || 4000,()=>console.log('Orbit API ready on port '+(process.env.PORT || 4000)))).catch(error=>{console.error('Database startup failed. Check credentials and Atlas network access. ('+error.name+')');process.exit(1);});
 }

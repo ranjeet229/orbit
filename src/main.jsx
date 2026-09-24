@@ -482,7 +482,7 @@ function App() {
         if (alive) setChats(d);
       })
       .catch((e) => setError(e.message));
-    const s = io({ withCredentials: true });
+    const s = io({ withCredentials: true, path: '/api/server/socket.io', transports: ['websocket'] });
     socket.current = s;
     s.on("connect", () => {
       setConnected(true);
