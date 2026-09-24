@@ -569,6 +569,15 @@ footer {
   border-radius: 9px;
   padding: 0 11px;
   color: #a8a2b4;
+  border: 1px solid transparent;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+.search-box:focus-within {
+  border-color: #b8a9f4;
+  box-shadow: 0 0 0 3px rgb(117 96 213 / 8%);
+}
+.search-box input:focus {
+  outline: none;
 }
 .sidebar > .search-box {
   margin: 17px 27px;
@@ -622,6 +631,16 @@ footer {
 .chat-card.selected {
   background: #f0ecf8;
 }
+.chat-card:focus {
+  outline: none;
+}
+.chat-card:focus-visible {
+  outline: 2px solid #b8a9f4;
+  outline-offset: 2px;
+}
+.conversation:focus {
+  outline: none;
+}
 .chat-card:hover {
   background: #f7f5fb;
 }
@@ -658,41 +677,18 @@ footer {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
-  flex: 0 0 24px;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
   border-radius: 50%;
   background: var(--purple);
   color: white;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 700;
   line-height: 1;
   font-variant-numeric: tabular-nums;
   padding: 0;
-  box-shadow: 0 2px 6px rgb(117 96 213 / 28%);
-}
-.sidebar-note {
-  display: flex;
-  gap: 11px;
-  border: 1px solid #eee8f4;
-  background: #fcfafd;
-  border-radius: 10px;
-  margin: 16px 23px;
-  padding: 14px 11px;
-}
-.sidebar-note > span {
-  color: #b6a0cd;
-  font-size: 18px;
-}
-.sidebar-note b {
-  font-size: 9px;
-  color: #9688a5;
-  font-weight: 500;
-}
-.sidebar-note p {
-  font-size: 8px;
-  color: #b3a9bd;
-  margin-top: 6px;
+  box-shadow: 0 1px 3px rgb(117 96 213 / 20%);
 }
 .account {
   border-top: 1px solid var(--line);
@@ -1297,10 +1293,6 @@ footer {
   }
   .greeting {
     padding-top: 32px;
-  }
-  .sidebar-note {
-    margin-top: 8px;
-    margin-bottom: 8px;
   }
 }
 @media (prefers-reduced-motion: reduce) {

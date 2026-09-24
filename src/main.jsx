@@ -435,6 +435,7 @@ function App() {
     [hasOlder, setHasOlder] = useState(false),
     [unread, setUnread] = useState({});
   const socket = useRef(),
+    conversationPanel = useRef(),
     bottom = useRef(),
     active = useRef(selected),
     typingTimer = useRef(),
@@ -459,6 +460,9 @@ function App() {
         setSelected(null);
         setTyping(null);
         clearTimeout(typingTimer.current);
+        conversationPanel.current?.focus({ preventScroll: true });
+      } else if (event.target instanceof HTMLElement && event.target.closest('.search-box')) {
+        event.target.blur();
       }
     };
     document.addEventListener("keydown", handleEscape);
@@ -937,13 +941,6 @@ function App() {
             </div>
           )}
         </div>
-        <div className="sidebar-note">
-          <span>✦</span>
-          <div>
-            <b>Small moments. Real connections.</b>
-            <p>Send that “just thinking of you” message.</p>
-          </div>
-        </div>
         <div className="account">
           <Avatar user={user} />
           <div>
@@ -962,7 +959,7 @@ function App() {
           </button>
         </div>
       </aside>
-      <main className={`conversation ${!selected ? "mobile-hide" : ""}`}>
+      <main ref={conversationPanel} tabIndex={-1} className={`conversation ${!selected ? "mobile-hide" : ""}`}>
         {demo && (
           <div className="demo-banner">
             <Sparkles size={14} /> Interactive demo · messages stay in this
