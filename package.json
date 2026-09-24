@@ -1,0 +1,43 @@
+{
+  "name": "orbit-chat",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "node --watch server/index.js",
+    "dev:client": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "start": "node server/index.js",
+    "test": "node --test server/*.test.js",
+    "test:integration": "node scripts/integration.mjs",
+    "test:browser": "node scripts/browser-check.mjs",
+    "test:presence": "node scripts/presence-check.mjs",
+    "format": "prettier --write src server scripts vite.config.js package.json index.html",
+    "check:db": "node scripts/check-db.mjs"
+  },
+  "dependencies": {
+    "@marsidev/react-turnstile": "^1.1.0",
+    "bcryptjs": "^3.0.2",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.0.1",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "lucide-react": "^0.468.0",
+    "mongoose": "^8.18.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@vitejs/plugin-react": "^5.0.2",
+    "concurrently": "^9.2.1",
+    "mongodb-memory-server": "^11.3.0",
+    "prettier": "^3.9.9",
+    "vite": "^7.1.3"
+  }
+}
